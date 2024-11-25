@@ -213,6 +213,475 @@ i think so,you are suggesting that i dont want to run it continuously after 5 mi
  that is being done in  code and u wanted this code to run  script with cloud scheduler for 1 day
 
  Please remove the while loop in the script before trying
+
+
+#################versio2 with changes ################### code to work better with Cloud Scheduler, removing the continuous monitoring loop and 
+####making it suitable for scheduled execution. 
+import feedparser
+import requests
+import os
+from datetime import datetime
+import logging
+import re
+from bs4 import BeautifulSoup
+from google.cloud import storage
+
+class SEBIRSSScraper:
+    def __init__(self):
+        """
+        Initialize the SEBI RSS scraper with the correct RSS feeds
+        """
+        self.rss_urls = [
+            "https://www.sebi.gov.in/rss/sebiall.xml",
+            "https://www.sebi.gov.in/sebirss.xml",    # All updates
+            "https://www.sebi.gov.in/rss.html"        # Circulars
+        ]
+        
+        self.base_url = "https://www.sebi.gov.in"
+        self.download_dir = "/tmp/sebi_pdfs"  # Using /tmp for Cloud Functions
+        self.processed_links_file = "processed_links.txt"
+        self.bucket_name = "your-gcs-bucket-name"  # Replace with your GCS bucket name
+        
+        # Set up logging
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s'
+        )
+        
+        # Create download directory if it doesn't exist
+        if not os.path.exists(self.download_dir):
+            os.makedirs(self.download_dir)
+            logging.info(f"Created download directory: {self.download_dir}")
+
+        # Initialize GCS client
+        self.storage_client = storage.Client()
+        self.bucket = self.storage_client.bucket(self.bucket_name)
+
+        # Load processed links from GCS
+        self.processed_links = self.load_processed_links()
+
+    def load_processed_links(self):
+        """Load processed links from GCS"""
+        try:
+            blob = self.bucket.blob(self.processed_links_file)
+            if blob.exists():
+                content = blob.download_as_text()
+                return set(content.splitlines())
+            return set()
+        except Exception as e:
+            logging.error(f"Error loading processed links: {str(e)}")
+            return set()
+
+    def save_processed_links(self):
+        """Save processed links to GCS"""
+        try:
+            blob = self.bucket.blob(self.processed_links_file)
+            blob.upload_from_string('\n'.join(self.processed_links))
+        except Exception as e:
+            logging.error(f"Error saving processed links: {str(e)}")
+
+    def upload_to_gcs(self, local_path, filename):
+        """Upload file to Google Cloud Storage"""
+        try:
+            blob = self.bucket.blob(f"pdfs/{filename}")
+            blob.upload_from_filename(local_path)
+            logging.info(f"Uploaded {filename} to GCS")
+            return True
+        except Exception as e:
+            logging.error(f"Error uploading to GCS: {str(e)}")
+            return False
+
+    def get_pdf_from_webpage(self, url):
+        """Extract PDF link from SEBI webpage"""
+        try:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+            response = requests.get(url, headers=headers, timeout=30)
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.text, 'html.parser')
+                for link in soup.find_all('a'):
+                    href = link.get('href', '')
+                    if href.lower().endswith('.pdf'):
+                        if not href.startswith('http'):
+                            href = self.base_url + href if href.startswith('/') else self.base_url + '/' + href
+                        return href
+            return None
+        except Exception as e:
+            logging.error(f"Error extracting PDF from webpage {url}: {str(e)}")
+            return None
+
+    def get_feed_entries(self):
+        """Fetch and parse multiple RSS feeds"""
+        all_entries = []
+        for rss_url in self.rss_urls:
+            try:
+                logging.info(f"Fetching feed from: {rss_url}")
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                }
+                response = requests.get(rss_url, headers=headers)
+                feed = feedparser.parse(response.content)
+                
+                if len(feed.entries) == 0:
+                    logging.warning(f"No entries found in feed: {rss_url}")
+                else:
+                    logging.info(f"Found {len(feed.entries)} entries in {rss_url}")
+                    all_entries.extend(feed.entries)
+                
+            except Exception as e:
+                logging.error(f"Error parsing RSS feed {rss_url}: {str(e)}")
+        
+        return all_entries
+
+    def download_pdf(self, url, filename):
+        """Download PDF from given URL"""
+        try:
+            logging.info(f"Attempting to download: {url}")
+            
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+            
+            response = requests.get(url, headers=headers, stream=True, timeout=30)
+            
+            if response.status_code == 200:
+                content_type = response.headers.get('content-type', '').lower()
+                if 'application/pdf' not in content_type and not url.lower().endswith('.pdf'):
+                    logging.warning(f"URL {url} might not be a PDF (content-type: {content_type})")
+                
+                filepath = os.path.join(self.download_dir, filename)
+                with open(filepath, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                
+                # Upload to GCS and delete local file
+                if self.upload_to_gcs(filepath, filename):
+                    os.remove(filepath)
+                    logging.info(f"Successfully processed: {filename}")
+                    return True
+                return False
+                
+            else:
+                logging.error(f"Failed to download {url}. Status code: {response.status_code}")
+                return False
+                
+        except Exception as e:
+            logging.error(f"Error downloading PDF {url}: {str(e)}")
+            return False
+
+    def clean_filename(self, title):
+        """Clean the filename to remove invalid characters"""
+        filename = "".join([c for c in title if c.isalnum() or c in (' ', '-', '_')]).rstrip()
+        filename = filename.replace(' ', '_') + '.pdf'
+        return filename
+
+    def process_entries(self):
+        """Process RSS feed entries and download new PDFs"""
+        entries = self.get_feed_entries()
+        new_pdfs = 0
+        
+        logging.info(f"Processing {len(entries)} entries")
+        
+        for entry in entries:
+            try:
+                if hasattr(entry, 'link'):
+                    pdf_url = None
+                    if entry.link.lower().endswith('.pdf'):
+                        pdf_url = entry.link
+                    else:
+                        pdf_url = self.get_pdf_from_webpage(entry.link)
+                    
+                    if pdf_url and pdf_url not in self.processed_links:
+                        title = entry.title if hasattr(entry, 'title') else f"sebi_doc_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                        filename = self.clean_filename(title)
+                        
+                        logging.info(f"Found new PDF: {pdf_url}")
+                        
+                        if self.download_pdf(pdf_url, filename):
+                            self.processed_links.add(pdf_url)
+                            new_pdfs += 1
+                        
+            except Exception as e:
+                logging.error(f"Error processing entry: {str(e)}")
+                continue
+        
+        # Save updated processed links to GCS
+        self.save_processed_links()
+        return new_pdfs
+
+def main(event, context):
+    """Cloud Function entry point"""
+    logging.info("Starting SEBI PDF Scraper...")
+    
+    scraper = SEBIRSSScraper()
+    new_pdfs = scraper.process_entries()
+    
+    logging.info(f"Scraping complete. Downloaded {new_pdfs} new PDF(s)")
+    return f"Successfully processed {new_pdfs} new PDFs"
+
+if __name__ == "__main__":
+    # For local testing
+    main(None, None)
  
-basically offload the script execution period to the cloud scheduler
- https://cloud.google.com/blog/products/application-development/how-to-schedule-a-recurring-python-script-on-gcp
+######verssion 3  EBI RSS Scraper with Enhanced Duplicate Prevention and Timestamp####
+import feedparser
+import requests
+import os
+import json
+from datetime import datetime
+import logging
+import hashlib
+from bs4 import BeautifulSoup
+from google.cloud import storage
+
+class SEBIRSSScraper:
+    def __init__(self):
+        """
+        Initialize the SEBI RSS scraper with the correct RSS feeds
+        """
+        self.rss_urls = [
+            "https://www.sebi.gov.in/rss/sebiall.xml",
+            "https://www.sebi.gov.in/sebirss.xml",    # All updates
+            "https://www.sebi.gov.in/rss.html"        # Circulars
+        ]
+        
+        self.base_url = "https://www.sebi.gov.in"
+        self.download_dir = "/tmp/sebi_pdfs"
+        self.metadata_file = "pdf_metadata.json"
+        self.bucket_name = "your-gcs-bucket-name"
+        
+        # Set up logging
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s'
+        )
+        
+        if not os.path.exists(self.download_dir):
+            os.makedirs(self.download_dir)
+            logging.info(f"Created download directory: {self.download_dir}")
+
+        # Initialize GCS client
+        self.storage_client = storage.Client()
+        self.bucket = self.storage_client.bucket(self.bucket_name)
+
+        # Load metadata from GCS
+        self.pdf_metadata = self.load_metadata()
+
+    def load_metadata(self):
+        """Load PDF metadata from GCS"""
+        try:
+            blob = self.bucket.blob(self.metadata_file)
+            if blob.exists():
+                content = blob.download_as_text()
+                return json.loads(content)
+            return {}
+        except Exception as e:
+            logging.error(f"Error loading metadata: {str(e)}")
+            return {}
+
+    def save_metadata(self):
+        """Save PDF metadata to GCS"""
+        try:
+            blob = self.bucket.blob(self.metadata_file)
+            blob.upload_from_string(json.dumps(self.pdf_metadata, indent=2))
+            logging.info("Metadata saved successfully")
+        except Exception as e:
+            logging.error(f"Error saving metadata: {str(e)}")
+
+    def calculate_file_hash(self, file_path):
+        """Calculate SHA-256 hash of a file"""
+        sha256_hash = hashlib.sha256()
+        with open(file_path, "rb") as f:
+            for byte_block in iter(lambda: f.read(4096), b""):
+                sha256_hash.update(byte_block)
+        return sha256_hash.hexdigest()
+
+    def upload_to_gcs(self, local_path, filename, metadata):
+        """Upload file to Google Cloud Storage with metadata"""
+        try:
+            blob = self.bucket.blob(f"pdfs/{filename}")
+            blob.metadata = {
+                'downloaded_at': metadata['downloaded_at'],
+                'source_url': metadata['source_url'],
+                'title': metadata['title'],
+                'file_hash': metadata['file_hash']
+            }
+            blob.upload_from_filename(local_path)
+            logging.info(f"Uploaded {filename} to GCS with metadata")
+            return True
+        except Exception as e:
+            logging.error(f"Error uploading to GCS: {str(e)}")
+            return False
+
+    def is_duplicate_pdf(self, file_path, url):
+        """
+        Check if PDF is duplicate based on content hash and URL
+        """
+        try:
+            # Calculate hash of downloaded file
+            file_hash = self.calculate_file_hash(file_path)
+            
+            # Check if hash exists in metadata
+            for pdf_info in self.pdf_metadata.values():
+                if pdf_info['file_hash'] == file_hash:
+                    logging.info(f"Duplicate content detected: {url}")
+                    return True
+                if pdf_info['source_url'] == url:
+                    logging.info(f"URL already processed: {url}")
+                    return True
+            
+            return False
+        except Exception as e:
+            logging.error(f"Error checking for duplicates: {str(e)}")
+            return False
+
+    def get_pdf_from_webpage(self, url):
+        """Extract PDF link from SEBI webpage"""
+        try:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+            response = requests.get(url, headers=headers, timeout=30)
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.text, 'html.parser')
+                for link in soup.find_all('a'):
+                    href = link.get('href', '')
+                    if href.lower().endswith('.pdf'):
+                        if not href.startswith('http'):
+                            href = self.base_url + href if href.startswith('/') else self.base_url + '/' + href
+                        return href
+            return None
+        except Exception as e:
+            logging.error(f"Error extracting PDF from webpage {url}: {str(e)}")
+            return None
+
+    def get_feed_entries(self):
+        """Fetch and parse multiple RSS feeds"""
+        all_entries = []
+        for rss_url in self.rss_urls:
+            try:
+                logging.info(f"Fetching feed from: {rss_url}")
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                }
+                response = requests.get(rss_url, headers=headers)
+                feed = feedparser.parse(response.content)
+                
+                if len(feed.entries) == 0:
+                    logging.warning(f"No entries found in feed: {rss_url}")
+                else:
+                    logging.info(f"Found {len(feed.entries)} entries in {rss_url}")
+                    all_entries.extend(feed.entries)
+                
+            except Exception as e:
+                logging.error(f"Error parsing RSS feed {rss_url}: {str(e)}")
+        
+        return all_entries
+
+    def download_pdf(self, url, filename, title):
+        """Download PDF from given URL"""
+        try:
+            logging.info(f"Attempting to download: {url}")
+            
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+            
+            response = requests.get(url, headers=headers, stream=True, timeout=30)
+            
+            if response.status_code == 200:
+                content_type = response.headers.get('content-type', '').lower()
+                if 'application/pdf' not in content_type and not url.lower().endswith('.pdf'):
+                    logging.warning(f"URL {url} might not be a PDF (content-type: {content_type})")
+                
+                filepath = os.path.join(self.download_dir, filename)
+                with open(filepath, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                
+                # Check for duplicates after download
+                if self.is_duplicate_pdf(filepath, url):
+                    os.remove(filepath)
+                    return False
+                
+                # Create metadata for the file
+                downloaded_at = datetime.now().isoformat()
+                metadata = {
+                    'downloaded_at': downloaded_at,
+                    'source_url': url,
+                    'title': title,
+                    'file_hash': self.calculate_file_hash(filepath)
+                }
+                
+                # Upload to GCS with metadata
+                if self.upload_to_gcs(filepath, filename, metadata):
+                    self.pdf_metadata[filename] = metadata
+                    self.save_metadata()
+                    os.remove(filepath)
+                    logging.info(f"Successfully processed: {filename}")
+                    return True
+                return False
+                
+            else:
+                logging.error(f"Failed to download {url}. Status code: {response.status_code}")
+                return False
+                
+        except Exception as e:
+            logging.error(f"Error downloading PDF {url}: {str(e)}")
+            return False
+
+    def clean_filename(self, title):
+        """Clean the filename to remove invalid characters and add timestamp"""
+        # Add timestamp to filename
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        clean_title = "".join([c for c in title if c.isalnum() or c in (' ', '-', '_')]).rstrip()
+        filename = f"{clean_title}_{timestamp}.pdf"
+        return filename.replace(' ', '_')
+
+    def process_entries(self):
+        """Process RSS feed entries and download new PDFs"""
+        entries = self.get_feed_entries()
+        new_pdfs = 0
+        
+        logging.info(f"Processing {len(entries)} entries")
+        
+        for entry in entries:
+            try:
+                if hasattr(entry, 'link'):
+                    pdf_url = None
+                    if entry.link.lower().endswith('.pdf'):
+                        pdf_url = entry.link
+                    else:
+                        pdf_url = self.get_pdf_from_webpage(entry.link)
+                    
+                    if pdf_url:
+                        title = entry.title if hasattr(entry, 'title') else f"sebi_doc_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                        filename = self.clean_filename(title)
+                        
+                        logging.info(f"Found PDF: {pdf_url}")
+                        
+                        if self.download_pdf(pdf_url, filename, title):
+                            new_pdfs += 1
+                        
+            except Exception as e:
+                logging.error(f"Error processing entry: {str(e)}")
+                continue
+        
+        return new_pdfs
+
+def main(event, context):
+    """Cloud Function entry point"""
+    logging.info("Starting SEBI PDF Scraper...")
+    
+    scraper = SEBIRSSScraper()
+    new_pdfs = scraper.process_entries()
+    
+    logging.info(f"Scraping complete. Downloaded {new_pdfs} new PDF(s)")
+    return f"Successfully processed {new_pdfs} new PDFs"
+
+if __name__ == "__main__":
+    # For local testing
+    main(None, None)
