@@ -31,7 +31,7 @@ streamlit run app.py
 
 ## Usage
 
-1. Add RSS feeds using the sidebar
+1. Add RSS feeds using the sidebar...
 2. View feed content in the Feed Viewer tab
 3. Download PDFs in the PDF Downloader tab
 4. Manage your feeds using the sidebar controls
