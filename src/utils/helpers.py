@@ -1,8 +1,6 @@
-# helpers.py
 import logging
 from pathlib import Path
-import pandas as pd
-from datetime import datetime
+import streamlit as st
 
 def setup_logging():
     """Configure logging for the application"""
@@ -18,23 +16,28 @@ def setup_logging():
         ]
     )
 
-# def load_css():
-#     """Load custom CSS styles"""
-#     css_file = Path("src/styles/main.css")
-#     if css_file.exists():
-#         with open(css_file) as f:
-#             return f"<style>{f.read()}</style>"
-#     return ""
+def create_directories():
+    """Create necessary directories if they don't exist"""
+    directories = [
+        Path("data/downloaded_pdfs"),
+        Path("logs")
+    ]
+    
+    for directory in directories:
+        directory.mkdir(parents=True, exist_ok=True)
 
+def format_date(date_str: str) -> str:
+    """Format date string for display"""
+    try:
+        from dateutil import parser
+        date_obj = parser.parse(date_str)
+        return date_obj.strftime("%B %d, %Y")
+    except:
+        return date_str
 
-import streamlit as st
-from pathlib import Path
-
-def load_css():
-    """Load and apply custom CSS styles"""
-    css_file = Path(__file__).parent.parent / "styles" / "main.css"
-    if css_file.exists():
-        with open(css_file) as f:
-            st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
-    else:
-        st.warning("CSS file not found!")
+def clean_text(text: str) -> str:
+    """Clean text for display"""
+    import re
+    text = re.sub(r'<[^>]+>', '', text)  # Remove HTML tags
+    text = ' '.join(text.split())  # Normalize whitespace
+    return text
