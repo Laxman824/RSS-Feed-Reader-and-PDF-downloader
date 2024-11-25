@@ -5,7 +5,7 @@ import logging
 from utils.helpers import setup_logging
 from components.sidebar import render_sidebar
 from components.widgets import display_header
-
+from utils.helpers import load_css
 # Configure the app
 def configure_app():
     """Configure the Streamlit app"""
@@ -37,7 +37,7 @@ def main():
     # Setup logging
     setup_logging()
     logger = logging.getLogger(__name__)
-    
+    load_css()
     try:
         # Configure app and load settings
         config = configure_app()
@@ -55,7 +55,7 @@ def main():
         st.write("## Welcome to  App")
         st.write("This is the main page of your application.")
         
-        # Add your main app content here
+        
         # ...
 
     except Exception as e:

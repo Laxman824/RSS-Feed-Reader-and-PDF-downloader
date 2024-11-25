@@ -1,0 +1,348 @@
+/* Main container styles */
+.stApp {
+    max-width: 1200px;
+    margin: 0 auto;
+    font-family: 'Inter', sans-serif;
+}
+
+/* Header styles */
+.stHeader {
+    background-color: #f8f9fa;
+    padding: 2rem 0;
+    margin-bottom: 2rem;
+    border-bottom: 1px solid #e9ecef;
+}
+
+/* Title and header text */
+h1 {
+    color: #1f2937;
+    font-weight: 700 !important;
+    font-size: 2.5rem !important;
+    margin-bottom: 1rem !important;
+}
+
+h2 {
+    color: #374151;
+    font-weight: 600 !important;
+    font-size: 1.8rem !important;
+    margin: 1.5rem 0 1rem 0 !important;
+}
+
+h3 {
+    color: #4b5563;
+    font-weight: 600 !important;
+    font-size: 1.5rem !important;
+    margin: 1rem 0 0.8rem 0 !important;
+}
+
+/* Sidebar styles */
+.css-1d391kg {  /* Sidebar container */
+    background-color: #f8fafc;
+    padding: 2rem 1rem;
+    border-right: 1px solid #e2e8f0;
+}
+
+/* Custom metric card */
+.metric-card {
+    background-color: #ffffff;
+    border: 1px solid #e5e7eb;
+    border-radius: 0.5rem;
+    padding: 1.5rem;
+    margin: 1rem 0;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+    transition: transform 0.2s ease-in-out;
+}
+
+.metric-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+}
+
+.metric-value {
+    font-size: 2rem;
+    font-weight: 700;
+    color: #1f2937;
+    margin: 0.5rem 0;
+}
+
+.metric-label {
+    font-size: 1rem;
+    color: #6b7280;
+    margin-bottom: 0.5rem;
+}
+
+/* Button styles */
+.stButton > button {
+    width: 100%;
+    border-radius: 0.375rem;
+    padding: 0.5rem 1rem;
+    font-weight: 500;
+    transition: all 0.2s ease-in-out;
+}
+
+.stButton > button:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+/* Primary button */
+.stButton > button.primary {
+    background-color: #2563eb;
+    color: white;
+}
+
+.stButton > button.primary:hover {
+    background-color: #1d4ed8;
+}
+
+/* Secondary button */
+.stButton > button.secondary {
+    background-color: #ffffff;
+    color: #4b5563;
+    border: 1px solid #d1d5db;
+}
+
+.stButton > button.secondary:hover {
+    background-color: #f9fafb;
+}
+
+/* Input field styles */
+.stTextInput > div > div > input {
+    border-radius: 0.375rem;
+    border: 1px solid #d1d5db;
+    padding: 0.5rem 1rem;
+    font-size: 1rem;
+}
+
+.stTextInput > div > div > input:focus {
+    border-color: #2563eb;
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+}
+
+/* Select box styles */
+.stSelectbox > div > div > select {
+    border-radius: 0.375rem;
+    border: 1px solid #d1d5db;
+    padding: 0.5rem 2rem 0.5rem 1rem;
+    font-size: 1rem;
+}
+
+/* Data table styles */
+.dataframe {
+    border: 1px solid #e5e7eb;
+    border-radius: 0.5rem;
+    overflow: hidden;
+}
+
+.dataframe thead tr th {
+    background-color: #f8fafc;
+    padding: 0.75rem 1rem;
+    font-weight: 600;
+    color: #374151;
+    border-bottom: 1px solid #e5e7eb;
+}
+
+.dataframe tbody tr td {
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid #e5e7eb;
+}
+
+.dataframe tbody tr:last-child td {
+    border-bottom: none;
+}
+
+/* Alert/Message styles */
+.stAlert {
+    padding: 1rem;
+    border-radius: 0.5rem;
+    margin: 1rem 0;
+}
+
+.success {
+    background-color: #ecfdf5;
+    border: 1px solid #10b981;
+    color: #065f46;
+}
+
+.warning {
+    background-color: #fffbeb;
+    border: 1px solid #f59e0b;
+    color: #92400e;
+}
+
+.error {
+    background-color: #fef2f2;
+    border: 1px solid #ef4444;
+    color: #991b1b;
+}
+
+/* Tab styles */
+.stTabs [data-baseweb="tab-list"] {
+    gap: 2rem;
+    border-bottom: 1px solid #e5e7eb;
+}
+
+.stTabs [data-baseweb="tab"] {
+    padding: 1rem 0;
+    color: #6b7280;
+    font-weight: 500;
+}
+
+.stTabs [data-baseweb="tab"][aria-selected="true"] {
+    color: #2563eb;
+    border-bottom: 2px solid #2563eb;
+}
+
+/* File uploader styles */
+.stFileUploader {
+    border: 2px dashed #e5e7eb;
+    border-radius: 0.5rem;
+    padding: 2rem;
+    text-align: center;
+    background-color: #f8fafc;
+}
+
+.stFileUploader:hover {
+    border-color: #2563eb;
+    background-color: #f0f7ff;
+}
+
+/* Progress bar styles */
+.stProgress > div > div > div {
+    background-color: #2563eb;
+    border-radius: 1rem;
+}
+
+.stProgress > div > div {
+    background-color: #e5e7eb;
+    border-radius: 1rem;
+}
+
+/* Expander styles */
+.streamlit-expanderHeader {
+    font-size: 1rem;
+    font-weight: 500;
+    color: #374151;
+    background-color: #f8fafc;
+    border: 1px solid #e5e7eb;
+    border-radius: 0.5rem;
+    padding: 0.75rem 1rem;
+}
+
+.streamlit-expanderHeader:hover {
+    background-color: #f0f7ff;
+}
+
+/* Radio button styles */
+.stRadio > div {
+    gap: 1rem;
+}
+
+.stRadio label {
+    padding: 0.5rem 1rem;
+    background-color: #ffffff;
+    border: 1px solid #d1d5db;
+    border-radius: 0.375rem;
+    cursor: pointer;
+    transition: all 0.2s ease-in-out;
+}
+
+.stRadio label:hover {
+    background-color: #f8fafc;
+}
+
+/* Checkbox styles */
+.stCheckbox > div > label {
+    cursor: pointer;
+}
+
+.stCheckbox > div > label > div {
+    border-radius: 0.25rem;
+    border: 2px solid #d1d5db;
+    width: 1.25rem;
+    height: 1.25rem;
+}
+
+.stCheckbox > div > label:hover > div {
+    border-color: #2563eb;
+}
+
+/* Responsive design */
+@media screen and (max-width: 768px) {
+    .stApp {
+        padding: 1rem;
+    }
+    
+    h1 {
+        font-size: 2rem !important;
+    }
+    
+    h2 {
+        font-size: 1.5rem !important;
+    }
+    
+    h3 {
+        font-size: 1.25rem !important;
+    }
+    
+    .metric-card {
+        padding: 1rem;
+    }
+    
+    .metric-value {
+        font-size: 1.5rem;
+    }
+    
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 1rem;
+    }
+}
+
+/* Dark mode support */
+@media (prefers-color-scheme: dark) {
+    .stApp {
+        background-color: #1f2937;
+        color: #f9fafb;
+    }
+    
+    .metric-card {
+        background-color: #374151;
+        border-color: #4b5563;
+    }
+    
+    .metric-value {
+        color: #f9fafb;
+    }
+    
+    .metric-label {
+        color: #d1d5db;
+    }
+    
+    .stButton > button.secondary {
+        background-color: #374151;
+        color: #f9fafb;
+        border-color: #4b5563;
+    }
+    
+    .stTextInput > div > div > input {
+        background-color: #374151;
+        color: #f9fafb;
+        border-color: #4b5563;
+    }
+    
+    .dataframe {
+        background-color: #374151;
+        border-color: #4b5563;
+    }
+    
+    .dataframe thead tr th {
+        background-color: #4b5563;
+        color: #f9fafb;
+    }
+    
+    .streamlit-expanderHeader {
+        background-color: #374151;
+        color: #f9fafb;
+        border-color: #4b5563;
+    }
+}

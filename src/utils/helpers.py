@@ -18,10 +18,23 @@ def setup_logging():
         ]
     )
 
+# def load_css():
+#     """Load custom CSS styles"""
+#     css_file = Path("src/styles/main.css")
+#     if css_file.exists():
+#         with open(css_file) as f:
+#             return f"<style>{f.read()}</style>"
+#     return ""
+
+
+import streamlit as st
+from pathlib import Path
+
 def load_css():
-    """Load custom CSS styles"""
-    css_file = Path("src/styles/main.css")
+    """Load and apply custom CSS styles"""
+    css_file = Path(__file__).parent.parent / "styles" / "main.css"
     if css_file.exists():
         with open(css_file) as f:
-            return f"<style>{f.read()}</style>"
-    return ""
+            st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
+    else:
+        st.warning("CSS file not found!")
