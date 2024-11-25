@@ -1,0 +1,218 @@
+!pip install feedparser requests beautifulsoup4
+import feedparser
+import requests
+import os
+from datetime import datetime
+import time
+from google.colab import files
+import logging
+import re
+from bs4 import BeautifulSoup
+
+class SEBIRSSScraper:
+    def __init__(self):
+        """
+        Initialize the SEBI RSS scraper with the correct RSS feeds
+        """
+        # Updated SEBI RSS feeds and added dummy rss feeds to check if pdf is downloading 
+        self.rss_urls = [
+            "https://www.sebi.gov.in/rss/sebiall.xml",
+            " https://techcrunch.com/feed/",     #dummy xml to verify pdf
+            "http://feeds.bbci.co.uk/news/rss.xml", #dummy xml 
+            "https://www.sebi.gov.in/sebirss.xml",    # All updates
+            "https://www.sebi.gov.in/rss.html",      #Circulars
+            "https://rss.nytimes.com/services/xml/rss/nyt/HomePage.xml"#dummy                                             # Press Releases
+       
+        ]
+        
+        self.base_url = "https://www.sebi.gov.in"
+        self.download_dir = "sebi_pdfs"
+        self.processed_links = set()
+        
+        # Set up logging with more detailed information
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.FileHandler('sebi_scraper.log'),
+                logging.StreamHandler()
+            ]
+        )
+        
+        # Create download directory if it doesn't exist
+        if not os.path.exists(self.download_dir):
+            os.makedirs(self.download_dir)
+            logging.info(f"Created download directory: {self.download_dir}")
+
+    def get_pdf_from_webpage(self, url):
+        """Extract PDF link from SEBI webpage"""
+        try:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+            response = requests.get(url, headers=headers, timeout=30)
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.text, 'html.parser')
+                # Look for PDF links in the page
+                for link in soup.find_all('a'):
+                    href = link.get('href', '')
+                    if href.lower().endswith('.pdf'):
+                        # Make sure we have the full URL
+                        if not href.startswith('http'):
+                            href = self.base_url + href if href.startswith('/') else self.base_url + '/' + href
+                        return href
+            return None
+        except Exception as e:
+            logging.error(f"Error extracting PDF from webpage {url}: {str(e)}")
+            return None
+
+    def get_feed_entries(self):
+        """Fetch and parse multiple RSS feeds"""
+        all_entries = []
+        for rss_url in self.rss_urls:
+            try:
+                logging.info(f"Fetching feed from: {rss_url}")
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                }
+                response = requests.get(rss_url, headers=headers)
+                feed = feedparser.parse(response.content)
+                
+                if len(feed.entries) == 0:
+                    logging.warning(f"No entries found in feed: {rss_url}")
+                else:
+                    logging.info(f"Found {len(feed.entries)} entries in {rss_url}")
+                    all_entries.extend(feed.entries)
+                
+            except Exception as e:
+                logging.error(f"Error parsing RSS feed {rss_url}: {str(e)}")
+        
+        return all_entries
+
+    def download_pdf(self, url, filename):
+        """Download PDF from given URL with improved error handling"""
+        try:
+            logging.info(f"Attempting to download: {url}")
+            
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+            
+            response = requests.get(url, headers=headers, stream=True, timeout=30)
+            
+            if response.status_code == 200:
+                # Check if it's actually a PDF
+                content_type = response.headers.get('content-type', '').lower()
+                if 'application/pdf' not in content_type and not url.lower().endswith('.pdf'):
+                    logging.warning(f"URL {url} might not be a PDF (content-type: {content_type})")
+                
+                filepath = os.path.join(self.download_dir, filename)
+                with open(filepath, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                logging.info(f"Successfully downloaded: {filename}")
+                print(f"Downloaded: {filename}")  # Print to console for visibility
+                return True
+            else:
+                logging.error(f"Failed to download {url}. Status code: {response.status_code}")
+                return False
+                
+        except requests.exceptions.Timeout:
+            logging.error(f"Timeout while downloading {url}")
+            return False
+        except Exception as e:
+            logging.error(f"Error downloading PDF {url}: {str(e)}")
+            return False
+
+    def clean_filename(self, title):
+        """Clean the filename to remove invalid characters"""
+        # Remove invalid characters
+        filename = "".join([c for c in title if c.isalnum() or c in (' ', '-', '_')]).rstrip()
+        # Replace spaces with underscores and ensure .pdf extension
+        filename = filename.replace(' ', '_') + '.pdf'
+        return filename
+
+    def process_entries(self):
+        """Process RSS feed entries and download new PDFs with improved logging"""
+        entries = self.get_feed_entries()
+        new_pdfs = 0
+        
+        logging.info(f"Processing {len(entries)} entries")
+        
+        for entry in entries:
+            try:
+                if hasattr(entry, 'link'):
+                    # First check if the link itself is a PDF
+                    pdf_url = None
+                    if entry.link.lower().endswith('.pdf'):
+                        pdf_url = entry.link
+                    else:
+                        # If not a PDF, try to extract PDF from the webpage
+                        pdf_url = self.get_pdf_from_webpage(entry.link)
+                    
+                    if pdf_url and pdf_url not in self.processed_links:
+                        # Generate filename from title
+                        title = entry.title if hasattr(entry, 'title') else f"sebi_doc_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                        filename = self.clean_filename(title)
+                        
+                        logging.info(f"Found new PDF: {pdf_url}")
+                        
+                        # Download the PDF
+                        if self.download_pdf(pdf_url, filename):
+                            self.processed_links.add(pdf_url)
+                            new_pdfs += 1
+                        
+            except Exception as e:
+                logging.error(f"Error processing entry: {str(e)}")
+                continue
+        
+        return new_pdfs
+
+    def monitor_feed(self, interval_minutes=5):
+        """Continuously monitor the RSS feed for new PDFs"""
+        logging.info(f"Starting SEBI RSS feed monitoring. Checking every {interval_minutes} minutes.")
+        logging.info(f"Monitoring the following feeds: {self.rss_urls}")
+        
+        while True:
+            try:
+                new_pdfs = self.process_entries()
+                logging.info(f"Completed check cycle. Found {new_pdfs} new PDF(s)")
+                
+                # Wait for the specified interval
+                print(f"\nWaiting {interval_minutes} minutes before next check...")
+                time.sleep(interval_minutes * 1)
+                
+            except KeyboardInterrupt:
+                logging.info("Monitoring stopped by user")
+                break
+            except Exception as e:
+                logging.error(f"Error during monitoring: {str(e)}")
+                # Wait a bit before retrying
+                time.sleep(60)
+
+def main():
+    """Main function to run the scraper"""
+    print("Starting SEBI PDF Scraper...")
+    print("PDFs will be downloaded to the 'sebi_pdfs' directory")
+    print("Press Ctrl+C to stop the scraper\n")
+    
+    # Initialize and run the scraper
+    scraper = SEBIRSSScraper()
+    
+    # Start monitoring
+    try:
+        scraper.monitor_feed(interval_minutes=5)  # Check every 5 miutes
+    except KeyboardInterrupt:
+        print("\nScraper stopped by user")
+
+if __name__ == "__main__":
+    main()
+
+i think so,you are suggesting that i dont want to run it continuously after 5 mins which is not ideal solution 
+ that is being done in  code and u wanted this code to run  script with cloud scheduler for 1 day
+
+ Please remove the while loop in the script before trying
+ 
+basically offload the script execution period to the cloud scheduler
+ https://cloud.google.com/blog/products/application-development/how-to-schedule-a-recurring-python-script-on-gcp
