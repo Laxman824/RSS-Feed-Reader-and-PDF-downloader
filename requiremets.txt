@@ -4,3 +4,33 @@ requests>=2.31.0
 beautifulsoup4>=4.12.0
 pandas>=2.0.0
 python-dateutil>=2.8.2
+
+your_streamlit_project/
+├── README.md
+├── requirements.txt
+├── .gitignore
+├── config/
+│   └── config.yaml
+├── src/
+│   ├── __init__.py
+│   ├── app.py
+│   ├── pages/
+│   │   ├── __init__.py
+│   │   ├── 01_home.py
+│   │   ├── 02_data_viewer.py
+│   │   └── 03_settings.py
+│   ├── components/
+│   │   ├── __init__.py
+│   │   ├── sidebar.py
+│   │   └── widgets.py
+│   ├── utils/
+│   │   ├── __init__.py
+│   │   ├── data_loader.py
+│   │   └── helpers.py
+│   └── styles/
+│       └── main.css
+├── data/
+│   ├── raw/
+│   └── processed/
+└── logs/
+    └── app.log
