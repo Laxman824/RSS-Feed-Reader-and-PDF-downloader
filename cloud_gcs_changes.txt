@@ -1,0 +1,1068 @@
+# rss_sebi_feed_download.py
+# Native imports
+import os
+from datetime import datetime
+import logging
+import re
+import json
+
+# Third-party imports
+import feedparser
+import requests
+from bs4 import BeautifulSoup
+from gcsfs import GCSFileSystem
+
+# Local imports
+from add_data_to_datastore import ingest_rss_feed_file
+
+class SEBIRSSScraper:
+    def __init__(self):
+        """
+        Initialize the SEBI RSS scraper with the correct RSS feeds and configurations
+        """
+        # RSS feed URLs
+        self.rss_urls = [
+            "https://www.sebi.gov.in/sebirss.xml",    # All updates
+            "https://www.sebi.gov.in/rss/sebiall.xml",
+            "https://www.sebi.gov.in/rss/sebi_circulars.xml"  # Circulars
+        ]
+
+        # Base configurations
+        self.base_url = "https://www.sebi.gov.in"
+        self.download_dir = "./sebi_pdfs"
+        self.processed_links_file = "processed_links.txt"
+        self.success_log_file = "successful_pdfs.log"
+        self.failed_log_file = "failed_pdfs.log"
+        
+        # GCS Configuration
+        self.gcs_local_path = "cams-search-mvp/rss_feed_ingestion/sebi_pdfs"
+        self.gcs_remote_path = "gs://cams-data-ingestion/sebi_realtime_rss_ingestion/download_pdf_sebi"
+        
+        # Initialize GCS filesystem
+        self.fs = GCSFileSystem()
+
+        # Document type mapping based on SEBI URL patterns
+        self.document_type_patterns = {
+            'enforcement/orders': 'ORDERS',
+            'enforcement/recovery-proceedings': 'ORDERS',
+            'legal/orders': 'ORDERS',
+            'circulars': 'CIRCULARS',
+            'press-releases': 'PRESS_RELEASES',
+            'reports': 'REPORTS',
+            'consultation-papers': 'CONSULTATION_PAPERS',
+            'act': 'ACTS',
+            'regulations': 'REGULATIONS',
+            'guidelines': 'GUIDELINES',
+            'notifications': 'NOTIFICATIONS'
+        }
+
+        # Set up logging
+        self.setup_logging()
+
+        # Create necessary directories
+        if not os.path.exists(self.download_dir):
+            os.makedirs(self.download_dir)
+            self.logger.info(f"Created download directory: {self.download_dir}")
+
+        # Load previously processed links
+        self.processed_links = self.load_processed_links()
+
+    def setup_logging(self):
+        """Set up enhanced logging with multiple handlers"""
+        # Create logs directory if it doesn't exist
+        logs_dir = "logs"
+        if not os.path.exists(logs_dir):
+            os.makedirs(logs_dir)
+
+        # Create and configure logger
+        self.logger = logging.getLogger('SEBIRSSScraper')
+        self.logger.setLevel(logging.INFO)
+
+        # Create formatters
+        detailed_formatter = logging.Formatter(
+            '%(asctime)s - %(levelname)s - %(message)s\nDetails: %(details)s\n',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        )
+        simple_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+
+        # Main log file handler
+        main_handler = logging.FileHandler(os.path.join(logs_dir, 'sebi_scraper.log'))
+        main_handler.setFormatter(detailed_formatter)
+        self.logger.addHandler(main_handler)
+
+        # Success log file handler
+        success_handler = logging.FileHandler(os.path.join(logs_dir, self.success_log_file))
+        success_handler.setFormatter(simple_formatter)
+        success_handler.setLevel(logging.INFO)
+        self.logger.addHandler(success_handler)
+
+        # Failed log file handler
+        failed_handler = logging.FileHandler(os.path.join(logs_dir, self.failed_log_file))
+        failed_handler.setFormatter(detailed_formatter)
+        failed_handler.setLevel(logging.ERROR)
+        self.logger.addHandler(failed_handler)
+
+        # Console handler
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(simple_formatter)
+        self.logger.addHandler(console_handler)
+
+    def log_with_details(self, level, message, details=None):
+        """Log message with additional details"""
+        extra = {'details': details if details else 'No additional details'}
+        self.logger.log(level, message, extra={'details': extra['details']})
+
+    def load_processed_links(self):
+        """Load previously processed links from local file"""
+        try:
+            if os.path.exists(self.processed_links_file):
+                with open(self.processed_links_file, 'r') as f:
+                    return set(f.read().splitlines())
+            return set()
+        except Exception as e:
+            self.log_with_details(logging.ERROR,
+                "Error loading processed links",
+                f"Error: {str(e)}")
+            return set()
+
+    def save_processed_links(self):
+        """Save processed links to local file"""
+        try:
+            with open(self.processed_links_file, 'w') as f:
+                f.write('\n'.join(self.processed_links))
+        except Exception as e:
+            self.log_with_details(logging.ERROR,
+                "Error saving processed links",
+                f"Error: {str(e)}")
+#part2
+    def get_pdf_from_webpage(self, url):
+            """Extract PDF link from SEBI webpage with improved parsing"""
+            try:
+                self.log_with_details(logging.INFO,
+                    f"Attempting to extract PDF from webpage",
+                    f"URL: {url}")
+
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    'Accept-Language': 'en-US,en;q=0.5',
+                }
+
+                response = requests.get(url, headers=headers, timeout=30)
+                if response.status_code == 200:
+                    soup = BeautifulSoup(response.text, 'html.parser')
+
+                    # Method 1: Look for PDF viewer iframe
+                    iframes = soup.find_all('iframe')
+                    self.log_with_details(logging.INFO,
+                        f"Found {len(iframes)} iframes on page",
+                        f"URL: {url}")
+                    
+                    for iframe in iframes:
+                        src = iframe.get('src', '')
+                        if src:
+                            if 'file=' in src:
+                                pdf_url = src.split('file=')[-1]
+                                self.log_with_details(logging.INFO,
+                                    f"Found PDF URL in iframe",
+                                    f"PDF URL: {pdf_url}")
+                                return pdf_url
+                            elif '../' in src and '.pdf' in src:
+                                pdf_path = src.split('../')[-1]
+                                if 'sebi_data/attachdocs' in pdf_path:
+                                    pdf_url = f"https://www.sebi.gov.in/{pdf_path}"
+                                    self.log_with_details(logging.INFO,
+                                        f"Found PDF URL in iframe with relative path",
+                                        f"PDF URL: {pdf_url}")
+                                    return pdf_url
+                            elif src.endswith('.pdf'):
+                                self.log_with_details(logging.INFO,
+                                    f"Found direct PDF in iframe",
+                                    f"PDF URL: {src}")
+                                return self._format_pdf_url(src)
+
+                    # Method 2: Check for specific SEBI PDF containers
+                    pdf_containers = soup.find_all('div', {'class': ['viewerjs-container', 'pdf-viewer', 'pdf-container']})
+                    for container in pdf_containers:
+                        for attr, value in container.attrs.items():
+                            if isinstance(value, str) and value.lower().endswith('.pdf'):
+                                self.log_with_details(logging.INFO,
+                                    f"Found PDF in container data attribute",
+                                    f"PDF URL: {value}")
+                                return self._format_pdf_url(value)
+
+                    # Method 3: Look for download links
+                    pdf_links = soup.find_all(['a', 'button'], 
+                        href=lambda x: x and x.lower().endswith('.pdf'))
+                    if pdf_links:
+                        pdf_url = pdf_links[0].get('href')
+                        self.log_with_details(logging.INFO,
+                            f"Found PDF in download link",
+                            f"PDF URL: {pdf_url}")
+                        return self._format_pdf_url(pdf_url)
+
+                    self.log_with_details(logging.WARNING,
+                        f"No PDF link found in webpage",
+                        f"URL: {url}")
+                    return None
+
+                else:
+                    self.log_with_details(logging.ERROR,
+                        f"Failed to fetch webpage",
+                        f"URL: {url}, Status code: {response.status_code}")
+                    return None
+
+            except Exception as e:
+                self.log_with_details(logging.ERROR,
+                    f"Error extracting PDF from webpage",
+                    f"URL: {url}, Error: {str(e)}")
+                return None
+
+        def _format_pdf_url(self, href):
+            """Helper method to properly format PDF URLs"""
+            if not href:
+                return None
+
+            try:
+                if href.startswith('http'):
+                    return href
+
+                if href.startswith('//'):
+                    return 'https:' + href
+
+                if href.startswith('../'):
+                    parts = href.split('/')
+                    clean_path = '/'.join([part for part in parts if part and part != '..'])
+                    return f"{self.base_url}/{clean_path}"
+
+                if href.startswith('/'):
+                    return self.base_url + href
+
+                return self.base_url + '/' + href
+
+            except Exception as e:
+                self.log_with_details(logging.ERROR,
+                    f"Error formatting PDF URL",
+                    f"URL: {href}, Error: {str(e)}")
+                return None
+
+        def _verify_pdf_url(self, url):
+            """Verify if URL actually points to a PDF"""
+            try:
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'Range': 'bytes=0-4'  # Only request first few bytes
+                }
+                response = requests.head(url, headers=headers, timeout=10)
+                content_type = response.headers.get('content-type', '').lower()
+
+                if 'application/pdf' in content_type:
+                    return True
+
+                if response.status_code == 200:
+                    response = requests.get(url, headers=headers, timeout=10)
+                    return response.content[:4] == b'%PDF'
+
+                return False
+
+            except Exception as e:
+                self.log_with_details(logging.ERROR,
+                    f"Error verifying PDF URL",
+                    f"URL: {url}, Error: {str(e)}")
+                return False
+
+        def download_pdf(self, url, filename):
+            """Download PDF from given URL with enhanced error handling"""
+            try:
+                self.log_with_details(logging.INFO,
+                    f"Starting download of PDF: {filename}",
+                    f"URL: {url}")
+
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                }
+
+                response = requests.get(url, headers=headers, stream=True, timeout=30)
+
+                if response.status_code == 200:
+                    content_type = response.headers.get('content-type', '').lower()
+                    if 'application/pdf' not in content_type and not url.lower().endswith('.pdf'):
+                        self.log_with_details(logging.WARNING,
+                            f"Content type mismatch for {filename}",
+                            f"Expected PDF but got: {content_type}")
+
+                    filepath = os.path.join(self.download_dir, filename)
+                    file_size = 0
+                    with open(filepath, 'wb') as f:
+                        for chunk in response.iter_content(chunk_size=8192):
+                            if chunk:
+                                file_size += len(chunk)
+                                f.write(chunk)
+
+                    self.log_with_details(logging.INFO,
+                        f"Successfully downloaded: {filename}",
+                        f"Size: {file_size/1024:.2f} KB")
+                    return True
+                else:
+                    self.log_with_details(logging.ERROR,
+                        f"Failed to download {filename}",
+                        f"Status code: {response.status_code}, Response: {response.text[:500]}")
+                    return False
+
+            except requests.Timeout:
+                self.log_with_details(logging.ERROR,
+                    f"Timeout while downloading {filename}",
+                    f"URL: {url}, Timeout: 30 seconds")
+                return False
+            except requests.RequestException as e:
+                self.log_with_details(logging.ERROR,
+                    f"Network error while downloading {filename}",
+                    f"URL: {url}, Error: {str(e)}")
+                return False
+            except Exception as e:
+                self.log_with_details(logging.ERROR,
+                    f"Unexpected error while downloading {filename}",
+                    f"URL: {url}, Error: {str(e)}")
+                return False
+#PART3
+        def get_feed_entries(self):
+                """Fetch and parse multiple RSS feeds with error handling"""
+                all_entries = []
+                for rss_url in self.rss_urls:
+                    try:
+                        self.log_with_details(logging.INFO,
+                            f"Fetching feed from URL",
+                            f"URL: {rss_url}")
+
+                        headers = {
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                        }
+                        response = requests.get(rss_url, headers=headers, timeout=30)
+                        
+                        if response.status_code != 200:
+                            self.log_with_details(logging.ERROR,
+                                f"Failed to fetch RSS feed",
+                                f"URL: {rss_url}, Status: {response.status_code}")
+                            continue
+
+                        feed = feedparser.parse(response.content)
+
+                        if len(feed.entries) == 0:
+                            self.log_with_details(logging.WARNING,
+                                f"No entries found in feed",
+                                f"URL: {rss_url}")
+                        else:
+                            self.log_with_details(logging.INFO,
+                                f"Successfully parsed feed",
+                                f"URL: {rss_url}, Entries found: {len(feed.entries)}")
+                            all_entries.extend(feed.entries)
+
+                    except requests.Timeout:
+                        self.log_with_details(logging.ERROR,
+                            f"Timeout fetching RSS feed",
+                            f"URL: {rss_url}")
+                    except Exception as e:
+                        self.log_with_details(logging.ERROR,
+                            f"Error parsing RSS feed",
+                            f"URL: {rss_url}, Error: {str(e)}")
+
+                return all_entries
+
+            def parse_sebi_date(self, date_str):
+                """Parse SEBI's date format (e.g., '06 Dec, 2024 +0530') to YYYY-MM-DD"""
+                try:
+                    # Remove timezone part if present
+                    date_str = date_str.split('+')[0].strip()
+                    # Parse the date
+                    dt = datetime.strptime(date_str, '%d %b, %Y')
+                    return dt.strftime('%Y-%m-%d')
+                except Exception as e:
+                    self.log_with_details(logging.ERROR,
+                        f"Error parsing date",
+                        f"Date string: {date_str}, Error: {str(e)}")
+                    return datetime.now().strftime('%Y-%m-%d')
+
+            def determine_document_type(self, url):
+                """Determine document type from SEBI URL"""
+                try:
+                    # Extract the section from the URL
+                    url_path = url.lower().split('sebi.gov.in/')[1]
+                    
+                    for pattern, doc_type in self.document_type_patterns.items():
+                        if pattern in url_path:
+                            self.log_with_details(logging.INFO,
+                                f"Document type determined",
+                                f"URL: {url}, Type: {doc_type}")
+                            return doc_type
+                    
+                    self.log_with_details(logging.WARNING,
+                        f"No matching document type found",
+                        f"URL: {url}, Using default type: OTHERS")
+                    return 'OTHERS'
+
+                except Exception as e:
+                    self.log_with_details(logging.ERROR,
+                        f"Error determining document type",
+                        f"URL: {url}, Error: {str(e)}")
+                    return 'OTHERS'
+
+            def extract_entry_metadata(self, entry):
+                """Extract and validate metadata from RSS entry"""
+                try:
+                    metadata = {
+                        'title': entry.title if hasattr(entry, 'title') else '',
+                        'description': entry.description if hasattr(entry, 'description') else '',
+                        'publication_date': self.parse_sebi_date(entry.pubDate) if hasattr(entry, 'pubDate') else datetime.now().strftime('%Y-%m-%d'),
+                        'document_type': self.determine_document_type(entry.link) if hasattr(entry, 'link') else 'OTHERS'
+                    }
+                    
+                    # Truncate title if too long (max 200 chars as per config)
+                    if len(metadata['title']) > 200:
+                        metadata['title'] = metadata['title'][:197] + '...'
+                        self.log_with_details(logging.WARNING,
+                            f"Title truncated",
+                            f"Original length: {len(entry.title)}, Truncated to: 200")
+                    
+                    self.log_with_details(logging.INFO,
+                        f"Metadata extracted successfully",
+                        f"Metadata: {json.dumps(metadata, indent=2)}")
+                    
+                    return metadata
+
+                except Exception as e:
+                    self.log_with_details(logging.ERROR,
+                        f"Error extracting metadata",
+                        f"Error: {str(e)}")
+                    return None
+
+            def clean_filename(self, title):
+                """Clean and truncate the filename for safe storage"""
+                try:
+                    # Remove special characters and spaces
+                    clean_title = "".join([c for c in title if c.isalnum() or c in (' ', '-', '_')]).rstrip()
+                    clean_title = clean_title.replace(' ', '_')
+                    
+                    # Add timestamp for uniqueness
+                    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                    
+                    # Truncate if too long (max 100 chars for filename)
+                    max_title_length = 100
+                    if len(clean_title) > max_title_length:
+                        truncated_title = clean_title[:max_title_length]
+                        filename = f"{truncated_title}_{timestamp}.pdf"
+                        self.log_with_details(logging.INFO,
+                            f"Filename truncated",
+                            f"Original: {clean_title}, Truncated: {truncated_title}")
+                    else:
+                        filename = f"{clean_title}_{timestamp}.pdf"
+                    
+                    return filename
+
+                except Exception as e:
+                    self.log_with_details(logging.ERROR,
+                        f"Error cleaning filename",
+                        f"Original title: {title}, Error: {str(e)}")
+                    # Fallback to timestamp-based filename
+                    return f"sebi_doc_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+            #part4
+            def upload_to_gcs(self, local_file_path, filename, entry):
+                    """Upload file to GCS and trigger ingestion with enhanced error handling"""
+                    try:
+                        gcs_file_path = f"{self.gcs_remote_path}/{filename}"
+                        self.log_with_details(logging.INFO,
+                            f"Starting upload to GCS",
+                            f"Local path: {local_file_path}, GCS path: {gcs_file_path}")
+                        
+                        # Upload the file to GCS
+                        self.fs.put(local_file_path, gcs_file_path)
+                        self.log_with_details(logging.INFO,
+                            f"Successfully uploaded to GCS",
+                            f"File: {filename}, GCS path: {gcs_file_path}")
+                        
+                        # Extract metadata
+                        try:
+                            metadata = self.extract_entry_metadata(entry)
+                            if not metadata:
+                                raise ValueError("Failed to extract metadata from entry")
+                            
+                            self.log_with_details(logging.INFO,
+                                f"Extracted metadata for ingestion",
+                                f"Metadata: {json.dumps(metadata, indent=2)}")
+
+                        except Exception as metadata_error:
+                            self.log_with_details(logging.ERROR,
+                                f"Metadata extraction failed",
+                                f"File: {filename}, Error: {str(metadata_error)}")
+                            raise
+
+                        # Perform ingestion
+                        try:
+                            self.log_with_details(logging.INFO,
+                                f"Starting ingestion process",
+                                f"File: {filename}, GCS path: {gcs_file_path}")
+                            
+                            result = ingest_rss_feed_file(
+                                file_path=gcs_file_path,
+                                publication_date=metadata['publication_date'],
+                                title=metadata['title'],
+                                file_name=filename,
+                                document_type=metadata['document_type'],
+                                doc_desc=metadata['description']
+                            )
+
+                            if result == "Success":
+                                self.log_with_details(logging.INFO,
+                                    f"Successfully ingested file",
+                                    f"File: {filename}, GCS path: {gcs_file_path}")
+                                # Log successful ingestion
+                                with open(os.path.join('logs', self.success_log_file), 'a') as f:
+                                    f.write(f"{datetime.now()} - {filename} - {gcs_file_path}\n")
+                            else:
+                                error_msg = f"Ingestion failed with message: {result}"
+                                self.log_with_details(logging.ERROR,
+                                    f"Ingestion failed",
+                                    f"File: {filename}, Error: {error_msg}")
+                                # Log failed ingestion
+                                with open(os.path.join('logs', self.failed_log_file), 'a') as f:
+                                    f.write(f"{datetime.now()} - {filename} - {error_msg}\n")
+                                raise Exception(error_msg)
+
+                        except Exception as ingest_error:
+                            self.log_with_details(logging.ERROR,
+                                f"Error during ingestion",
+                                f"File: {filename}, Error: {str(ingest_error)}")
+                            raise
+                        
+                        # Clean up local file
+                        try:
+                            os.remove(local_file_path)
+                            self.log_with_details(logging.INFO,
+                                f"Deleted local file",
+                                f"Path: {local_file_path}")
+                        except Exception as cleanup_error:
+                            self.log_with_details(logging.WARNING,
+                                f"Failed to delete local file",
+                                f"File: {local_file_path}, Error: {str(cleanup_error)}")
+                        
+                        return True
+
+                    except Exception as e:
+                        self.log_with_details(logging.ERROR,
+                            f"Upload/ingestion process failed",
+                            f"File: {filename}, Error: {str(e)}")
+                        # Log failure
+                        with open(os.path.join('logs', self.failed_log_file), 'a') as f:
+                            f.write(f"{datetime.now()} - {filename} - Error: {str(e)}\n")
+                        return False
+#part6
+
+            def process_entries(self):
+                    """Main function to process RSS feed entries with comprehensive logging"""
+                    try:
+                        entries = self.get_feed_entries()
+                        self.log_with_details(logging.INFO,
+                            f"Starting entry processing",
+                            f"Total entries found: {len(entries)}")
+
+                        successful_pdfs = []
+                        failed_pdfs = []
+
+                        for entry in entries:
+                            try:
+                                if not hasattr(entry, 'link'):
+                                    continue
+
+                                pdf_url = None
+                                if entry.link.lower().endswith('.pdf'):
+                                    pdf_url = entry.link
+                                else:
+                                    pdf_url = self.get_pdf_from_webpage(entry.link)
+
+                                if pdf_url and pdf_url not in self.processed_links:
+                                    if self._verify_pdf_url(pdf_url):
+                                        title = entry.title if hasattr(entry, 'title') else f"sebi_doc_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                                        filename = self.clean_filename(title)
+                                        local_file_path = os.path.join(self.download_dir, filename)
+
+                                        self.log_with_details(logging.INFO,
+                                            f"Processing new document",
+                                            f"Title: {title}\nURL: {pdf_url}")
+
+                                        if self.download_pdf(pdf_url, filename):
+                                            if self.upload_to_gcs(local_file_path, filename, entry):
+                                                self.processed_links.add(pdf_url)
+                                                successful_pdfs.append(filename)
+                                                self.log_with_details(logging.INFO,
+                                                    f"Successfully processed document",
+                                                    f"Filename: {filename}")
+                                            else:
+                                                failed_pdfs.append((filename, "GCS upload/ingestion failed"))
+                                                self.log_with_details(logging.ERROR,
+                                                    f"Failed to process document",
+                                                    f"Filename: {filename}, Reason: GCS upload/ingestion failed")
+                                        else:
+                                            failed_pdfs.append((filename, "Download failed"))
+                                            self.log_with_details(logging.ERROR,
+                                                f"Failed to process document",
+                                                f"Filename: {filename}, Reason: Download failed")
+                                    else:
+                                        self.log_with_details(logging.WARNING,
+                                            f"Invalid PDF URL",
+                                            f"URL: {pdf_url}")
+
+                            except Exception as entry_error:
+                                error_msg = str(entry_error)
+                                self.log_with_details(logging.ERROR,
+                                    f"Error processing entry",
+                                    f"Error: {error_msg}")
+                                if hasattr(entry, 'title'):
+                                    failed_pdfs.append((entry.title, error_msg))
+
+                        # Generate detailed summary
+                        summary = {
+                            "total_entries_found": len(entries),
+                            "successful_downloads": len(successful_pdfs),
+                            "failed_downloads": len(failed_pdfs),
+                            "successful_files": successful_pdfs,
+                            "failed_files": dict(failed_pdfs)
+                        }
+
+                        # Log final summary
+                        self.log_with_details(logging.INFO,
+                            "Processing Summary",
+                            json.dumps(summary, indent=2))
+
+                        # Write summary to a separate summary file
+                        try:
+                            summary_file = os.path.join('logs', 'processing_summary.json')
+                            with open(summary_file, 'w') as f:
+                                json.dump(summary, f, indent=2)
+                            self.log_with_details(logging.INFO,
+                                "Wrote processing summary to file",
+                                f"File: {summary_file}")
+                        except Exception as summary_error:
+                            self.log_with_details(logging.ERROR,
+                                "Failed to write summary file",
+                                f"Error: {str(summary_error)}")
+
+                        return len(successful_pdfs)
+
+                    except Exception as e:
+                        self.log_with_details(logging.ERROR,
+                            "Fatal error in process_entries",
+                            f"Error: {str(e)}")
+                        return 0
+
+                    finally:
+                        self.save_processed_links()
+
+
+            def main():
+                """Main execution function with error handling and reporting"""
+                start_time = datetime.now()
+                
+                try:
+                    # Set up basic logging for the main function
+                    logging.basicConfig(
+                        level=logging.INFO,
+                        format='%(asctime)s - %(levelname)s - %(message)s',
+                        handlers=[
+                            logging.StreamHandler(),
+                            logging.FileHandler('sebi_scraper_main.log')
+                        ]
+                    )
+                    
+                    logging.info("Starting SEBI RSS Feed Scraper")
+                    logging.info(f"Start time: {start_time}")
+
+                    # Initialize and run scraper
+                    scraper = SEBIRSSScraper()
+                    new_pdfs = scraper.process_entries()
+                    
+                    # Calculate execution time
+                    end_time = datetime.now()
+                    execution_time = end_time - start_time
+                    
+                    # Log completion status
+                    logging.info("\nScraping process completed")
+                    logging.info(f"Total new PDFs processed: {new_pdfs}")
+                    logging.info(f"Start time: {start_time}")
+                    logging.info(f"End time: {end_time}")
+                    logging.info(f"Total execution time: {execution_time}")
+                    
+                    # Print user-friendly summary
+                    print("\n=== SEBI RSS Feed Scraper Summary ===")
+                    print(f"Process completed successfully")
+                    print(f"New PDFs processed: {new_pdfs}")
+                    print(f"Total execution time: {execution_time}")
+                    print("\nDetailed logs available in:")
+                    print("- logs/sebi_scraper.log : Complete execution log")
+                    print("- logs/successful_pdfs.log : Successfully processed PDFs")
+                    print("- logs/failed_pdfs.log : Failed operations")
+                    print("- logs/processing_summary.json : Detailed processing summary")
+                    
+                except Exception as e:
+                    logging.error(f"Fatal error in main execution: {str(e)}")
+                    print(f"\nError: Scraping process failed. Check logs for details.")
+                    raise
+
+            if __name__ == "__main__":
+                main()
+
+
+
+
+
+##########add_data_to_datastore.py$$$$$$$$$$
+
+# Native imports
+from datetime import datetime
+import os
+import hashlib
+import json
+import logging
+import re
+from typing import Optional, Dict, Any, Union
+import traceback
+
+# Third-party imports
+import pandas as pd
+from google.cloud import storage
+from google.cloud import bigquery
+
+# User-defined imports
+import config
+from data_store_refresh import update_data_store
+from run_bq_select_statement import run_bq_select_statement
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(module)s - %(message)s',
+    handlers=[
+        logging.FileHandler('ingestion.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+class DocumentValidationError(Exception):
+    """Custom exception for document validation errors"""
+    pass
+
+class DataStoreIngestionError(Exception):
+    """Custom exception for data store ingestion errors"""
+    pass
+
+def validate_document(
+    file_path: str,
+    title: str,
+    publication_date: str,
+    document_type: str
+) -> None:
+    """
+    Validate document parameters before ingestion.
+    
+    Args:
+        file_path: GCS path of the file
+        title: Document title
+        publication_date: Publication date string
+        document_type: Document type string
+    
+    Raises:
+        DocumentValidationError: If validation fails
+    """
+    try:
+        # Validate file path
+        if not file_path.startswith('gs://'):
+            raise DocumentValidationError("Invalid file path. Must be a GCS path starting with 'gs://'")
+
+        # Validate title length
+        if len(title) > config.DOCUMENT_TITLE_LENGTH:
+            raise DocumentValidationError(
+                f"Title exceeds maximum length of {config.DOCUMENT_TITLE_LENGTH} characters"
+            )
+
+        # Validate file size
+        try:
+            file_size = config.fs.du(file_path)
+            if file_size == 0:
+                raise DocumentValidationError("File is empty (0 bytes)")
+            if file_size > config.DOCUMENT_FILE_SIZE_LIMIT:
+                raise DocumentValidationError(
+                    f"File exceeds size limit of {config.DOCUMENT_FILE_SIZE_LIMIT/1024/1024:.2f} MB"
+                )
+        except Exception as e:
+            raise DocumentValidationError(f"Error checking file size: {str(e)}")
+
+        # Validate file extension
+        _, file_ext = os.path.splitext(file_path)
+        if file_ext.lower() not in ['.pdf', '.docx']:
+            raise DocumentValidationError("Invalid file format. Only .pdf and .docx files are supported")
+
+        # Validate publication date format
+        try:
+            datetime.strptime(publication_date, '%Y-%m-%d')
+        except ValueError:
+            raise DocumentValidationError(
+                "Invalid publication date format. Required format: YYYY-MM-DD"
+            )
+
+        # Validate document type
+        valid_types = {
+            'ACTS', 'CIRCULARS', 'NOTIFICATIONS', 'ORDERS',
+            'PRESS_RELEASES', 'REPORTS', 'CONSULTATION_PAPERS',
+            'REGULATIONS', 'GUIDELINES', 'OTHERS'
+        }
+        if document_type not in valid_types:
+            raise DocumentValidationError(
+                f"Invalid document type. Must be one of: {', '.join(valid_types)}"
+            )
+
+    except DocumentValidationError:
+        raise
+    except Exception as e:
+        raise DocumentValidationError(f"Validation error: {str(e)}")
+
+def prepare_ingestion_json(
+    doc_id: str,
+    title: str,
+    publication_date: str,
+    file_name: str,
+    document_type: str,
+    doc_desc: str,
+    file_path: str,
+    file_ext: str
+) -> Dict[str, Any]:
+    """
+    Prepare the JSON structure for Vertex AI Search ingestion.
+    
+    Args:
+        doc_id: Document ID (MD5 hash)
+        title: Document title
+        publication_date: Publication date
+        file_name: File name
+        document_type: Document type
+        doc_desc: Document description
+        file_path: GCS file path
+        file_ext: File extension
+    
+    Returns:
+        Dict containing the structured data for ingestion
+    """
+    try:
+        return {
+            "id": doc_id,
+            "structData": {
+                "title": title,
+                "date": publication_date,
+                "pdf_name": file_name,
+                "type": document_type,
+                "doc_desc": doc_desc,
+            },
+            "content": {
+                "mimeType": config.MIME_MAP.get(file_ext.replace(".", "").lower()),
+                "uri": file_path,
+            },
+        }
+    except Exception as e:
+        logger.error(f"Error preparing ingestion JSON: {str(e)}")
+        raise
+
+def calculate_md5(file_path: str) -> str:
+    """
+    Calculate MD5 hash of file content.
+    
+    Args:
+        file_path: GCS file path
+    
+    Returns:
+        MD5 hash string
+    
+    Raises:
+        Exception: If file reading or hash calculation fails
+    """
+    try:
+        hasher = hashlib.md5()
+        with config.fs.open(file_path, "rb") as f:
+            for chunk in iter(lambda: f.read(4096), b""):
+                hasher.update(chunk)
+        return hasher.hexdigest()
+    except Exception as e:
+        logger.error(f"Error calculating MD5 for {file_path}: {str(e)}")
+        raise
+
+def check_document_exists(doc_id: str) -> bool:
+    """
+    Check if document already exists in BigQuery.
+    
+    Args:
+        doc_id: Document ID to check
+    
+    Returns:
+        bool indicating if document exists
+    """
+    try:
+        query = f"""
+        SELECT doc_id 
+        FROM `{config.BQ_DATASET}.{config.BQ_DOCUMENT_METADATA_TABLE}` 
+        WHERE doc_id='{doc_id}' AND doc_is_deleted=0
+        """
+        df_res = run_bq_select_statement(query)
+        return not df_res.empty
+    except Exception as e:
+        logger.error(f"Error checking document existence: {str(e)}")
+        raise
+
+def save_to_bigquery(data: Dict[str, Any]) -> None:
+    """
+    Save document metadata to BigQuery.
+    
+    Args:
+        data: Document metadata dictionary
+    
+    Raises:
+        Exception: If BigQuery operation fails
+    """
+    try:
+        df_data = pd.DataFrame(
+            columns=[
+                "doc_id",
+                "doc_name",
+                "doc_type",
+                "doc_publish_dt",
+                "doc_date_ingested",
+                "doc_is_deleted",
+                "doc_gcs_uri",
+                "doc_desc",
+            ],
+            data=[[
+                data["id"],
+                data["structData"]["title"],
+                data["structData"]["type"],
+                data["structData"]["date"],
+                datetime.now().strftime("%Y-%m-%d"),
+                0,
+                data["content"]["uri"],
+                data["structData"]["doc_desc"],
+            ]],
+        )
+        
+        df_data.to_gbq(
+            destination_table=f"{config.BQ_DATASET}.{config.BQ_DOCUMENT_METADATA_TABLE}",
+            if_exists="append",
+            project_id=config.PROJECT_ID,
+            location=config.PROJECT_LOCATION,
+        )
+        logger.info(f"Successfully saved metadata to BigQuery for document {data['id']}")
+    except Exception as e:
+        logger.error(f"Error saving to BigQuery: {str(e)}")
+        raise
+
+def ingest_rss_feed_file(
+    file_path: str, 
+    publication_date: str, 
+    title: str, 
+    file_name: str, 
+    document_type: str,
+    doc_desc: str,
+) -> str:
+    """
+    Ingest a file downloaded via RSS Feed script into datastore.
+
+    Args:
+        file_path: GCS path of the file
+        publication_date: Publication date in YYYY-MM-DD format
+        title: Document title
+        file_name: File name
+        document_type: Document type (ACTS, CIRCULARS, etc.)
+        doc_desc: Document description
+
+    Returns:
+        Success message or error description
+    """
+    logger.info(f"Starting ingestion for file: {file_path}")
+    
+    try:
+        # Validate all input parameters
+        validate_document(file_path, title, publication_date, document_type)
+        logger.info("Document validation successful")
+
+        # Calculate document ID
+        doc_id = calculate_md5(file_path)
+        logger.info(f"Generated document ID: {doc_id}")
+
+        # Check if document already exists
+        if check_document_exists(doc_id):
+            logger.warning(f"Document already exists with ID: {doc_id}")
+            return "Document already exists"
+
+        # Get file extension
+        _, file_ext = os.path.splitext(file_path)
+
+        # Prepare ingestion JSON
+        data_ingestion_json = prepare_ingestion_json(
+            doc_id, title, publication_date, file_name,
+            document_type, doc_desc, file_path, file_ext
+        )
+        logger.info("Prepared ingestion JSON")
+
+        # Create and upload JSONL file
+        jsonl_file_name = "sebi_rss_processed.jsonl"
+        try:
+            with open(jsonl_file_name, "w") as f_hdl:
+                json.dump(data_ingestion_json, f_hdl)
+            
+            jsonl_gcs_path = f"gs://{config.BUCKET_NAME}/{config.DIRECTORY_PREFIX_DATA_INGESTION_UPLOAD}/{jsonl_file_name}"
+            config.fs.put(jsonl_file_name, jsonl_gcs_path)
+            logger.info(f"Uploaded JSONL to {jsonl_gcs_path}")
+            
+            # Clean up local JSONL file
+            os.remove(jsonl_file_name)
+        except Exception as e:
+            logger.error(f"Error handling JSONL file: {str(e)}")
+            raise
+
+        # Trigger Vertex AI Search ingestion
+        try:
+            update_data_store(
+                data_store_id=config.ALL_SEBI_DATASTORE_ID,
+                gcs_uri=[jsonl_gcs_path],
+                data_schema="document",
+                update=1,
+            )
+            logger.info("Successfully triggered Vertex AI Search ingestion")
+        except Exception as e:
+            logger.error(f"Error in Vertex AI Search ingestion: {str(e)}")
+            raise DataStoreIngestionError(f"Vertex AI Search ingestion failed: {str(e)}")
+
+        # Save metadata to BigQuery
+        save_to_bigquery(data_ingestion_json)
+        logger.info("Successfully saved metadata to BigQuery")
+
+        return "Success"
+
+    except DocumentValidationError as e:
+        logger.error(f"Validation error: {str(e)}")
+        return f"Validation error: {str(e)}"
+    except DataStoreIngestionError as e:
+        logger.error(f"Ingestion error: {str(e)}")
+        return f"Ingestion error: {str(e)}"
+    except Exception as e:
+        logger.error(f"Unexpected error: {str(e)}\n{traceback.format_exc()}")
+        return f"Unexpected error: {str(e)}"
+
+if __name__ == "__main__":
+    # Example usage
+    try:
+        result = ingest_rss_feed_file(
+            file_path='gs://cams-data-ingestion/sebi_realtime_rss_ingestion/download_pdf_sebi/example.pdf',
+            publication_date='2024-12-08',
+            title='Example Document',
+            file_name='example.pdf',
+            document_type='CIRCULARS',
+            doc_desc='Example description'
+        )
+        print(f"Ingestion result: {result}")
+    except Exception as e:
+        print(f"Error in example usage: {str(e)}")
